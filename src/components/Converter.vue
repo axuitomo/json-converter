@@ -51,7 +51,36 @@
               />
             </el-select>
           </el-form-item>
+          <el-form-item label="提示词监控">
+            <el-button 
+              type="info" 
+              @click="showPromptPreview"
+              :disabled="!canPreviewPrompt"
+              :icon="View"
+            >
+              查看提示词
+            </el-button>
+            <el-tag v-if="conversionStatus" :type="statusTagType" style="margin-left: 10px">
+              {{ conversionStatus }}
+            </el-tag>
+          </el-form-item>
         </el-form>
+
+        <!-- 转换日志 -->
+        <el-collapse v-if="conversionLogs.length > 0" style="margin-top: 10px">
+          <el-collapse-item title="转换日志" name="logs">
+            <el-timeline>
+              <el-timeline-item
+                v-for="(log, index) in conversionLogs"
+                :key="index"
+                :timestamp="log.timestamp"
+                :type="log.type"
+              >
+                {{ log.message }}
+              </el-timeline-item>
+            </el-timeline>
+          </el-collapse-item>
+        </el-collapse>
       </div>
     </el-card>
 
@@ -157,6 +186,35 @@
         <el-button type="primary" @click="confirmFetchUrl">确定</el-button>
       </template>
     </el-dialog>
+
+    <!-- 提示词预览对话框 -->
+    <el-dialog 
+      v-model="promptDialogVisible" 
+      title="AI提示词预览" 
+      width="800px"
+      :close-on-click-modal="false"
+    >
+      <el-alert
+        title="提示词说明"
+        type="info"
+        description="以下是将要发送给AI的完整提示词内容，您可以查看AI将如何理解您的转换需求。"
+        :closable="false"
+        style="margin-bottom: 15px"
+      />
+      <el-input
+        v-model="previewPrompt"
+        type="textarea"
+        :rows="20"
+        readonly
+        style="font-family: 'Courier New', monospace; font-size: 13px;"
+      />
+      <template #footer>
+        <el-button @click="promptDialogVisible = false">关闭</el-button>
+        <el-button type="primary" @click="copyPrompt" :icon="DocumentCopy">
+          复制提示词
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -168,7 +226,8 @@ import {
   Refresh,
   Delete,
   DocumentCopy,
-  Download
+  Download,
+  View
 } from '@element-plus/icons-vue'
 import { convertToLunaTV, convertToOmnibox } from '../utils/converter'
 import { fetchModelsFromAPI, convertWithAI } from '../utils/aiService'
@@ -189,6 +248,20 @@ const aiConfig = ref({
 })
 const models = ref([])
 
+// 提示词监控
+const promptDialogVisible = ref(false)
+const previewPrompt = ref('')
+const conversionStatus = ref('')
+const conversionLogs = ref([])
+
+// 状态标签类型
+const statusTagType = computed(() => {
+  if (conversionStatus.value.includes('成功')) return 'success'
+  if (conversionStatus.value.includes('失败')) return 'danger'
+  if (conversionStatus.value.includes('转换中')) return 'warning'
+  return 'info'
+})
+
 // 是否可以转换
 const canConvert = computed(() => {
   if (!inputJson.value.trim()) return false
@@ -200,6 +273,11 @@ const canConvert = computed(() => {
     )
   }
   return true
+})
+
+// 是否可以预览提示词
+const canPreviewPrompt = computed(() => {
+  return inputJson.value.trim() && outputFormat.value
 })
 
 // 处理模式切换
@@ -275,15 +353,27 @@ const convertJson = async () => {
     const inputData = JSON.parse(inputJson.value)
 
     if (conversionMode.value === 'ai') {
-      // AI转换
+      // AI转换 - 添加状态监控
+      conversionStatus.value = '准备转换...'
+      addLog('开始AI转换', 'info')
+      
       const prompt = generateConversionPrompt(inputData, outputFormat.value)
+      addLog('已生成提示词', 'success')
+      
+      conversionStatus.value = '转换中...'
+      addLog(`调用API: ${aiConfig.value.apiUrl}`, 'info')
+      addLog(`使用模型: ${aiConfig.value.model}`, 'info')
+      
       const converted = await convertWithAI(
         aiConfig.value.apiUrl,
         aiConfig.value.apiKey,
         aiConfig.value.model,
         prompt
       )
+      
       outputJson.value = converted
+      conversionStatus.value = '转换成功 ✓'
+      addLog('AI转换完成', 'success')
     } else {
       // 本地转换
       let converted
@@ -297,6 +387,10 @@ const convertJson = async () => {
 
     ElMessage.success('转换成功')
   } catch (error) {
+    if (conversionMode.value === 'ai') {
+      conversionStatus.value = '转换失败 ✗'
+      addLog(`错误: ${error.message}`, 'danger')
+    }
     ElMessage.error('转换失败：' + error.message)
   }
 }
@@ -385,6 +479,49 @@ const downloadOutput = () => {
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
   ElMessage.success('下载成功')
+}
+
+// 显示提示词预览
+const showPromptPreview = () => {
+  if (!inputJson.value.trim()) {
+    ElMessage.warning('请先输入待转换的JSON数据')
+    return
+  }
+
+  try {
+    const inputData = JSON.parse(inputJson.value)
+    previewPrompt.value = generateConversionPrompt(inputData, outputFormat.value)
+    promptDialogVisible.value = true
+    addLog('查看提示词预览', 'info')
+  } catch (error) {
+    ElMessage.error('无法生成提示词：' + error.message)
+  }
+}
+
+// 复制提示词
+const copyPrompt = () => {
+  navigator.clipboard.writeText(previewPrompt.value).then(
+    () => {
+      ElMessage.success('提示词已复制到剪贴板')
+    },
+    () => {
+      ElMessage.error('复制失败')
+    }
+  )
+}
+
+// 添加日志
+const addLog = (message, type = 'info') => {
+  const timestamp = new Date().toLocaleTimeString('zh-CN')
+  conversionLogs.value.unshift({
+    message,
+    type,
+    timestamp
+  })
+  // 只保留最近10条日志
+  if (conversionLogs.value.length > 10) {
+    conversionLogs.value = conversionLogs.value.slice(0, 10)
+  }
 }
 </script>
 
